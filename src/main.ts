@@ -10,6 +10,7 @@ import {
 import path from "path"
 import os from "os"
 import { shell } from "electron"
+import { autoUpdater } from "electron-updater"
 import { AuthManager, VerificationTier } from "./auth-manager"
 import { FolderWatcher } from "./folder-watcher"
 import { TakeoutDetector } from "./takeout-detector"
@@ -773,6 +774,45 @@ app.on("ready", async () => {
   // so the tray is already created (otherwise macOS may treat it as a
   // background app with no UI and silently exit).
   app.dock?.hide()
+
+  // DH1 §5 — auto-update against the publish target
+  // (haawfi/genegraph-import-helper, configured in
+  // package.json#build.publish). The default
+  // `checkForUpdatesAndNotify()` behaviour is good enough for v1:
+  // updates download in the background, then prompt the user to
+  // relaunch when ready. No custom UI in DH1; that's later polish.
+  //
+  // Skip in dev (when packaged === false) — electron-updater would
+  // otherwise log noisy "no app-update.yml" errors against the
+  // unpacked tsc output. The packaged app reads the YAML that
+  // electron-builder writes alongside the binaries.
+  if (app.isPackaged) {
+    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.error("[autoUpdate] initial check failed:", err)
+    })
+    // Re-check every 4 hours while the app is running. Helper is
+    // a tray-only long-lived process; users may leave it running
+    // for days. Polling at this cadence catches new releases
+    // without hammering GitHub.
+    setInterval(
+      () => {
+        autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+          console.error("[autoUpdate] periodic check failed:", err)
+        })
+      },
+      4 * 60 * 60 * 1000,
+    )
+  }
+})
+
+// DH1 §5 — surface auto-updater errors to stdout so they're
+// visible in `Console.app` (macOS) and Event Viewer (Windows)
+// when an alpha tester reports "the helper hasn't updated for
+// a week." Don't show a dialog; auto-update is opportunistic
+// and a user-facing error popup would feel intrusive for a
+// background tray app.
+autoUpdater.on("error", (err) => {
+  console.error("[autoUpdate] error:", err)
 })
 
 app.on("window-all-closed", () => {
