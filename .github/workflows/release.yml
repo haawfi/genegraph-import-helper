@@ -79,8 +79,15 @@ jobs:
       # is stored in Actions as base64 because GitHub secrets are
       # opaque strings; .p8 contains binary bytes that don't survive
       # round-tripping through the secret-store as plaintext.
+      #
+      # Condition uses `secrets.APPLE_API_KEY != ''` directly —
+      # the previous shape (`env.APPLE_API_KEY_B64 != ''`) was a
+      # subtle bug because `if:` is evaluated BEFORE the step's
+      # `env:` block populates, so the env var is empty at gate
+      # time and the step always skipped. Step-level `if:` can
+      # reference secrets directly since GitHub Actions 2022.
       - name: Decode Apple API key (.p8) — macOS only
-        if: matrix.os == 'macos-latest' && env.APPLE_API_KEY_B64 != ''
+        if: matrix.os == 'macos-latest' && secrets.APPLE_API_KEY != ''
         env:
           APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
         run: |
@@ -88,8 +95,25 @@ jobs:
           echo "$APPLE_API_KEY_B64" | base64 --decode > $RUNNER_TEMP/apple/api-key.p8
           echo "APPLE_API_KEY=$RUNNER_TEMP/apple/api-key.p8" >> $GITHUB_ENV
 
+      # Conditional publish — when GH_TOKEN is present, upload
+      # artifacts to GitHub Releases; when absent (validation /
+      # bootstrap runs before Hafiz adds the secret), build only.
+      # The DH1 spec requires the workflow to succeed end-to-end
+      # without secrets so the pipeline is provably correct
+      # before the first signed release goes out.
+      #
+      # `shell: bash` works on both macOS and Windows runners
+      # (Git Bash is preinstalled on windows-latest).
       - name: Build + publish
-        run: npm run dist -- --publish always
+        shell: bash
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            echo "GH_TOKEN present — running with --publish always"
+            npm run dist -- --publish always
+          else
+            echo "GH_TOKEN absent — building unsigned/un-published artifacts only"
+            npm run dist -- --publish never
+          fi
         env:
           # GitHub release publishing
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
