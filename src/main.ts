@@ -19,6 +19,7 @@ import { ChunkedUploader } from "./chunked-uploader"
 import { NotificationManager } from "./notification-manager"
 import { SettingsStore } from "./settings-store"
 import { showUploadConfirmation, ConfirmationRequest } from "./upload-confirmation"
+import { hashArchive } from "./archive-hash"
 
 /**
  * GeneGraph Import Helper
@@ -457,6 +458,27 @@ async function confirmAndUpload(
   const filename = path.basename(archivePath)
   const confidence = metadata.confidence || "high"
 
+  // ── DH2 §1: streaming SHA-256 hash before the modal ──────────────
+  // Computed once after the watcher confirms the archive is stable.
+  // Surfaced to the user as an 8-char fingerprint in the modal so
+  // they can recognize that we know what we're about to upload.
+  // Server uses the full hex digest for the dedup query at session-
+  // create time. Failures here are non-fatal — fall through to a
+  // null hash, which makes the server skip the dedup short-circuit
+  // and behave exactly as pre-DH2 (always create new session).
+  let archiveSha256: string | null = null
+  try {
+    archiveSha256 = await hashArchive(archivePath)
+    console.log(
+      `[Upload] Archive hash for ${filename}: ${archiveSha256.slice(0, 12)}…`,
+    )
+  } catch (err) {
+    console.warn(
+      `[Upload] Failed to hash ${filename}; will create a new session without dedup:`,
+      err,
+    )
+  }
+
   // ── Safety gate: user confirmation ────────────────────────────────
   const confirmRequest: ConfirmationRequest = {
     archivePath,
@@ -467,6 +489,7 @@ async function confirmAndUpload(
     partCount: metadata.totalParts || 1,
     allParts: metadata.allPartsFound || [archivePath],
     verificationTier: appState.verificationTier,
+    archiveSha256,
   }
 
   const decision = await showUploadConfirmation(confirmRequest)
@@ -483,7 +506,13 @@ async function confirmAndUpload(
 
   // ── User approved — proceed with upload ───────────────────────────
   console.log(`[Upload] User approved upload of ${filename}`)
-  await executeUpload(authToken, archivePath, metadata)
+  // Plumb the hash through `metadata` so executeSingleUpload can
+  // include it in the session-create POST without changing the
+  // function's existing signature.
+  await executeUpload(authToken, archivePath, {
+    ...metadata,
+    archiveSha256,
+  })
 }
 
 // ─── Upload Queue ──────────────────────────────────────────────────────────
@@ -564,6 +593,14 @@ async function executeSingleUpload(
     }
 
     // ── Create upload session ───────────────────────────────────────
+    // DH2 §1 — body carries the optional archiveSha256 hash. Server
+    // uses it to short-circuit re-uploads:
+    //   - If the same hash is COMPLETED for this user, the response
+    //     is `{ deduplicated: true, ... }` and we skip the upload.
+    //   - If it matches a non-terminal session, the response carries
+    //     `{ resuming: true, session: { ... } }` and we resume that
+    //     session id instead of creating a new one.
+    //   - If it doesn't match (or no hash supplied), normal create.
     const deviceId = authManager?.["deviceInfo"]?.deviceId || `${os.hostname()}-${process.platform}`
     const sessionResponse = await fetch(
       `${apiBaseUrl}/api/import/desktop/upload`,
@@ -578,6 +615,13 @@ async function executeSingleUpload(
           zipFilename: filename,
           partsExpected: metadata.totalParts || 1,
           totalBytes: metadata.fileSizeBytes || metadata.totalBytes || 0,
+          // Conditional spread: omit the field entirely when null
+          // so legacy / hash-less callers keep their pre-DH2 wire
+          // shape and pass through any future strict-validation
+          // middleware that rejects unknown fields.
+          ...(metadata.archiveSha256
+            ? { archiveSha256: metadata.archiveSha256 }
+            : {}),
         }),
       }
     )
@@ -586,8 +630,34 @@ async function executeSingleUpload(
       throw new Error(`Failed to create upload session: ${sessionResponse.statusText}`)
     }
 
-    const sessionData = await sessionResponse.json() as { session: { id: string } }
+    const sessionData = (await sessionResponse.json()) as
+      | { deduplicated: true; existingSessionId: string; completedAt: number; zipFilename: string }
+      | { deduplicated?: false; resuming?: boolean; session: { id: string } }
+
+    // DH2 §1 — handle the dedup short-circuit. The "already
+    // uploaded" branch lights a notification and exits; the
+    // confirmation modal's "already-uploaded" variant in step 4
+    // catches this case before we ever land in executeSingleUpload.
+    // Reaching here means the user explicitly opted to override —
+    // in v1 we still skip (to avoid double-uploading the same
+    // archive) and surface the existing completion. Override-and-
+    // re-upload requires a separate user gesture handled in step 4.
+    if ("deduplicated" in sessionData && sessionData.deduplicated === true) {
+      console.log(
+        `[Upload] Server reports ${filename} already uploaded; skipping. Existing session: ${sessionData.existingSessionId}`,
+      )
+      notificationManager?.showDetection(
+        `Already uploaded: ${filename}`,
+      )
+      return
+    }
+
     const sessionId = sessionData.session.id
+    if (sessionData.resuming) {
+      console.log(
+        `[Upload] Resuming existing non-terminal session ${sessionId} for ${filename}`,
+      )
+    }
 
     // ── Upload with server-confirmed progress ───────────────────────
     let lastNotifiedPercent = -1

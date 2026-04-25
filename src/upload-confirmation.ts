@@ -38,6 +38,12 @@ export interface ConfirmationRequest {
   allParts: string[]
   /** User's verification tier — used for soft step-up messaging */
   verificationTier?: "email" | "identity" | "bank"
+  /** DH2 §1 — full SHA-256 hex digest. Modal renders the first 8
+   *  chars as a fingerprint string for user reassurance ("we
+   *  know what we're about to upload"). Null on legacy callers
+   *  that didn't compute a hash; the fingerprint affordance is
+   *  hidden in that case. */
+  archiveSha256?: string | null
 }
 
 export type ConfirmationResult = "approved" | "rejected" | "dismissed"
@@ -139,6 +145,11 @@ function buildConfirmationHTML(req: ConfirmationRequest): string {
     <div class="row"><span class="label">Size</span><span class="value">${sizeFormatted}</span></div>
     ${isMultiPart ? `<div class="row"><span class="label">Parts</span><span class="value">${req.partCount} archive parts</span></div>` : ""}
     <div class="row"><span class="label">Confidence</span><span class="value">${req.confidence === "high" ? "High" : "Medium"}</span></div>
+    ${
+      req.archiveSha256
+        ? `<div class="row"><span class="label">Fingerprint</span><span class="value" title="${escapeHtml(req.archiveSha256)}" style="font-family: ui-monospace, monospace;">${escapeHtml(req.archiveSha256.slice(0, 8))}</span></div>`
+        : ""
+    }
   </div>
 
   ${isMedium ? `
