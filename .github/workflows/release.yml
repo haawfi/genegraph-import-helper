@@ -77,23 +77,31 @@ jobs:
       # macOS-only: write the App Store Connect API key (.p8) to a
       # temp file so notarytool can read it as a path. The API key
       # is stored in Actions as base64 because GitHub secrets are
-      # opaque strings; .p8 contains binary bytes that don't survive
-      # round-tripping through the secret-store as plaintext.
+      # opaque strings; .p8 contains binary bytes that don't
+      # survive round-tripping through the secret-store as plain
+      # text.
       #
-      # Condition uses `secrets.APPLE_API_KEY != ''` directly —
-      # the previous shape (`env.APPLE_API_KEY_B64 != ''`) was a
-      # subtle bug because `if:` is evaluated BEFORE the step's
-      # `env:` block populates, so the env var is empty at gate
-      # time and the step always skipped. Step-level `if:` can
-      # reference secrets directly since GitHub Actions 2022.
+      # Step-level `if:` can't reference `secrets.X` directly —
+      # GitHub Actions blocks the secrets context outside of
+      # `env:` mappings as a security policy. So the empty-check
+      # lives inside the bash script where the env var IS
+      # available. When APPLE_API_KEY is unset (validation /
+      # bootstrap runs), the step exits 0 cleanly without
+      # writing the .p8 — notarize.js then short-circuits on
+      # the also-missing APPLE_API_KEY_ID.
       - name: Decode Apple API key (.p8) — macOS only
-        if: matrix.os == 'macos-latest' && secrets.APPLE_API_KEY != ''
+        if: matrix.os == 'macos-latest'
+        shell: bash
         env:
           APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
         run: |
-          mkdir -p $RUNNER_TEMP/apple
-          echo "$APPLE_API_KEY_B64" | base64 --decode > $RUNNER_TEMP/apple/api-key.p8
-          echo "APPLE_API_KEY=$RUNNER_TEMP/apple/api-key.p8" >> $GITHUB_ENV
+          if [ -z "$APPLE_API_KEY_B64" ]; then
+            echo "APPLE_API_KEY secret absent — skipping .p8 decode"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/apple"
+          echo "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/apple/api-key.p8"
+          echo "APPLE_API_KEY=$RUNNER_TEMP/apple/api-key.p8" >> "$GITHUB_ENV"
 
       # Conditional publish — when GH_TOKEN is present, upload
       # artifacts to GitHub Releases; when absent (validation /
