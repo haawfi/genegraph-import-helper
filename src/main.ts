@@ -285,6 +285,18 @@ function updateTrayMenu() {
       label: "Watch Folder...",
       click: () => selectWatchFolder(),
     },
+    // DH2 §5 — "Active uploads" section. Surfaces resumable +
+    // failed uploads from the local upload-state-store with a
+    // submenu offering Resume / Cancel per entry. Visible only
+    // when at least one entry exists; hidden cleanly otherwise.
+    // Resume re-runs the reconciler against this entry's session
+    // (the actual chunked-upload pickup happens via
+    // executeUpload re-detecting the archive). Cancel clears the
+    // local entry; the server-side cleanup is deferred (the
+    // server's stale-session sweep handles it eventually).
+    ...(uploadStateStore && uploadStateStore.list().length > 0
+      ? buildActiveUploadsMenuItems(uploadStateStore.list())
+      : []),
     {
       label: "Recent Uploads",
       submenu:
@@ -320,6 +332,85 @@ function updateTrayMenu() {
   ])
 
   tray.setContextMenu(contextMenu)
+}
+
+/**
+ * DH2 §5 — Build the tray menu items for active uploads.
+ *
+ * Renders a header row + one submenu per active upload. Each
+ * submenu offers a "Resume upload" item (re-runs the reconcile
+ * for that entry; the user follows up by re-detecting the
+ * archive) and a "Cancel upload" item (clears the local entry).
+ *
+ * Entries are sorted most-recently-active first so the user
+ * sees the upload they care about at the top.
+ *
+ * Failed entries get a different submenu shape — Resume isn't
+ * meaningful (there's nothing in flight), so they show
+ * "Re-detect to retry" + "Clear" instead.
+ */
+function buildActiveUploadsMenuItems(
+  uploads: ActiveUpload[],
+): Electron.MenuItemConstructorOptions[] {
+  const sorted = [...uploads].sort(
+    (a, b) =>
+      new Date(b.lastActivityAt).getTime() -
+      new Date(a.lastActivityAt).getTime(),
+  )
+  const items: Electron.MenuItemConstructorOptions[] = [
+    { type: "separator" },
+    {
+      label: `Active uploads (${sorted.length})`,
+      enabled: false,
+    },
+  ]
+  for (const upload of sorted) {
+    const filename = path.basename(upload.archivePath)
+    const partsLabel =
+      upload.lastConfirmedChunk >= 0
+        ? `${upload.lastConfirmedChunk + 1} of ${upload.partsExpected} parts uploaded`
+        : `${upload.partsExpected} parts queued`
+    const statusLabel = upload.status === "failed" ? "❌ failed" : "⏸ paused"
+    items.push({
+      label: `${filename} — ${statusLabel}`,
+      submenu: [
+        { label: partsLabel, enabled: false },
+        ...(upload.failureReason
+          ? [{ label: `Reason: ${upload.failureReason}`, enabled: false }]
+          : []),
+        { type: "separator" as const },
+        ...(upload.status !== "failed"
+          ? [
+              {
+                label: "Resume upload",
+                click: () => {
+                  console.log(
+                    `[Tray] User asked to resume ${upload.sessionId}; re-running reconciler.`,
+                  )
+                  void runStartupReconcile()
+                },
+              },
+            ]
+          : [
+              {
+                label: "Re-detect to retry",
+                enabled: false,
+              },
+            ]),
+        {
+          label: upload.status === "failed" ? "Clear" : "Cancel upload",
+          click: () => {
+            console.log(
+              `[Tray] User asked to cancel ${upload.sessionId}; clearing local state.`,
+            )
+            uploadStateStore?.remove(upload.sessionId)
+            updateTrayMenu()
+          },
+        },
+      ],
+    })
+  }
+  return items
 }
 
 /**
