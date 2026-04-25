@@ -1,6 +1,7 @@
 import axios, { AxiosError } from "axios"
 import fs from "fs/promises"
 import path from "path"
+import { isInPostWakeWindow } from "./wake-clock"
 
 /**
  * ChunkedUploader
@@ -302,7 +303,16 @@ export class ChunkedUploader {
     uploadedBytes?: number
     error?: string
   }> {
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    // DH2 §3 — `attempt` advances on every failure that counts
+    // against the budget. Failures inside the post-wake tolerance
+    // window (30s after a powerMonitor "resume" event) DON'T
+    // increment the counter; they're treated as expected
+    // network-still-stabilizing flakes per the spec. The post-
+    // wake exemption stops counting after the window closes, so
+    // a server that's genuinely down doesn't get infinite
+    // retries.
+    let attempt = 1
+    while (attempt <= MAX_RETRIES) {
       try {
         const formData = new FormData()
         formData.append("sessionId", sessionId)
@@ -330,11 +340,24 @@ export class ChunkedUploader {
           uploadedBytes: response.data.uploadedBytes,
         }
       } catch (error) {
-        const isLast = attempt === MAX_RETRIES
         const errMsg = error instanceof AxiosError
           ? error.response?.data?.error || error.message
           : String(error)
 
+        // DH2 §3 — post-wake exemption. Don't increment `attempt`,
+        // don't decrement the budget. Just log + short delay +
+        // try again. The window caps at 30s after the most
+        // recent OS wake; outside it, normal retry budget
+        // applies.
+        if (isInPostWakeWindow()) {
+          console.warn(
+            `[Uploader] Chunk ${chunkIndex} failed within the post-wake tolerance window; not counting against retry budget: ${errMsg}`,
+          )
+          await new Promise((resolve) => setTimeout(resolve, 2_000))
+          continue
+        }
+
+        const isLast = attempt === MAX_RETRIES
         if (isLast) {
           console.error(
             `[Uploader] Chunk ${chunkIndex} failed after ${MAX_RETRIES} attempts: ${errMsg}`
@@ -348,6 +371,7 @@ export class ChunkedUploader {
           `[Uploader] Chunk ${chunkIndex} attempt ${attempt}/${MAX_RETRIES} failed, retrying in ${delay}ms: ${errMsg}`
         )
         await new Promise((resolve) => setTimeout(resolve, delay))
+        attempt++
       }
     }
 

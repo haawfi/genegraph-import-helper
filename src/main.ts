@@ -6,6 +6,7 @@ import {
   ipcMain,
   dialog,
   Notification,
+  powerMonitor,
 } from "electron"
 import path from "path"
 import os from "os"
@@ -22,6 +23,7 @@ import { showUploadConfirmation, ConfirmationRequest } from "./upload-confirmati
 import { hashArchive } from "./archive-hash"
 import { UploadStateStore, type ActiveUpload } from "./upload-state-store"
 import { reconcileOnStartup, type ReconcileOutcome } from "./startup-reconciler"
+import { markWakeNow } from "./wake-clock"
 
 /**
  * GeneGraph Import Helper
@@ -979,6 +981,50 @@ app.on("ready", async () => {
   // so the tray is already created (otherwise macOS may treat it as a
   // background app with no UI and silently exit).
   app.dock?.hide()
+
+  // DH2 §3 — OS sleep/wake handling. Long sleeps (laptop closed
+  // for hours mid-upload) used to look identical to transient
+  // network failures: the 3-attempt budget burned out, the
+  // upload was marked failed, the user came back to find nothing
+  // had happened.
+  //
+  // suspend → flush local state to disk so a forced shutdown
+  // during sleep doesn't lose the resume pointer. Don't try to
+  // abort in-flight network calls; they'll error naturally on
+  // wake and the post-wake tolerance handles the rest.
+  //
+  // resume → mark the wake clock; chunked-uploader.ts uses the
+  // resulting 30s tolerance window to NOT count post-wake
+  // failures against the retry budget. Then run the reconciler
+  // against the server's current state and re-arm any resumable
+  // uploads.
+  //
+  // lock-screen / unlock-screen are intentionally NO-OPS — a
+  // user locking their screen is not the same as the OS
+  // suspending; uploads should keep running normally.
+  powerMonitor.on("suspend", () => {
+    console.log("[PowerMonitor] System suspending; flushing upload state.")
+    if (uploadStateStore) uploadStateStore.markAllPaused()
+  })
+
+  powerMonitor.on("resume", async () => {
+    console.log("[PowerMonitor] System resumed; arming post-wake tolerance.")
+    markWakeNow()
+    // Give the network 10s to stabilize before probing the server.
+    // Wi-Fi reconnects, VPN re-handshakes, etc. all need a beat.
+    await new Promise((r) => setTimeout(r, 10_000))
+    if (appState.isAuthenticated && uploadStateStore) {
+      await runStartupReconcile()
+    }
+  })
+
+  // Lock != sleep. Uploads keep running across screen-lock.
+  powerMonitor.on("lock-screen", () => {
+    /* no-op by design */
+  })
+  powerMonitor.on("unlock-screen", () => {
+    /* no-op by design */
+  })
 
   // DH1 §5 — auto-update against the publish target
   // (haawfi/genegraph-import-helper, configured in
