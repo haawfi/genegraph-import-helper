@@ -1,0 +1,57 @@
+# ─── Build outputs ────────────────────────────────────────────────
+# `dist/` contains both the TypeScript build artifacts AND the
+# electron-builder release outputs (.dmg, .exe, .blockmap, latest.yml).
+# Neither belongs in source control — TS output is reproducible from
+# `npm run build`; release artifacts live on GitHub Releases.
+dist/
+out/
+build/Release/
+build/Debug/
+*.tsbuildinfo
+
+# ─── Dependencies ─────────────────────────────────────────────────
+node_modules/
+
+# ─── Signing certificates (defense in depth) ──────────────────────
+# These should never live in source control. Even if a developer
+# accidentally `git add`s a cert, this list catches it before the
+# commit lands. Real cert plumbing is env-var driven (CSC_LINK,
+# APPLE_API_KEY, WIN_CSC_LINK) and decoded from base64 at build
+# time on CI runners — never on disk in the repo.
+*.p12
+*.pfx
+*.p8
+*.cer
+*.pem
+*.key
+
+# ─── Secrets ──────────────────────────────────────────────────────
+# Resend API keys, Cloudinary credentials, signing passwords,
+# notarization Apple-ID app-specific passwords. .env* covers all
+# common dotenv variants (.env, .env.local, .env.production, etc.).
+.env
+.env.*
+
+# ─── Logs ─────────────────────────────────────────────────────────
+# Electron + electron-builder log to stderr but some integrations
+# write log files alongside the source tree. Excluding these
+# prevents accidentally committing logs that include filesystem
+# paths, Apple notarization request IDs, or other diagnostic info.
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── OS noise ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ─── Editor noise ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
