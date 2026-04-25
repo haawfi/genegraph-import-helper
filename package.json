@@ -31,6 +31,7 @@
     "electron-builder": "^26.8.1",
     "typescript": "^5.0.0"
   },
+  "//windows-signing-todo": "TODO: add publisherName under build.win.signtoolOptions.publisherName when Windows code-signing certs land. Removed from build.win at DH1 §4 follow-up because electron-builder 26.x relocated the property and rejects it at the top of build.win as an unknown property. Until then, unsigned builds carry no publisher metadata anyway, so absence is correct.",
   "build": {
     "appId": "com.genegraph.famvault.desktop-helper",
     "productName": "GeneGraph Import Helper",
@@ -74,7 +75,6 @@
     },
     "win": {
       "icon": "build/icon.png",
-      "publisherName": "AccuWealth Holding Oy",
       "target": [
         {
           "target": "nsis",

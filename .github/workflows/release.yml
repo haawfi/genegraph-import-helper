@@ -55,7 +55,7 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Tag-triggered runs check out the tag automatically;
           # workflow_dispatch needs an explicit ref to land on the
@@ -63,7 +63,7 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Setup Node 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: "npm"
