@@ -1,6 +1,7 @@
 import keytar from "keytar"
 import axios from "axios"
 import os from "os"
+import { app } from "electron"
 
 /**
  * AuthManager
@@ -133,27 +134,40 @@ export class AuthManager {
    * verification paths are already method-agnostic and will work
    * unchanged when this is implemented.
    */
-  async startEidAuth(): Promise<{ url: string; sessionId: string } | null> {
-    // Future: POST /api/auth/desktop/eid/start
-    // Returns { url: "https://genegraph.eu/auth/eid?session=...", sessionId: "..." }
-    // Electron opens the URL in the default browser via shell.openExternal(url)
-    // Then calls pollForEidToken(sessionId) on an interval
-    throw new Error("eID auth not yet implemented")
+  async startEidAuth(): Promise<{ available: false; reason: "deferred" }> {
+    // DH1 — eID is deferred until investor/grant funding lands
+    // (per `docs/strategy.md` and project_pricing_model.md). The
+    // architectural contract for the future implementation is
+    // preserved in the comment block below; the runtime contract
+    // is now a structured "not available" return rather than a
+    // throw, so callers can branch cleanly without try/catch.
+    //
+    // Future shape (when implemented):
+    //   POST /api/auth/desktop/eid/start
+    //   → { url: "https://genegraph.eu/auth/eid?session=...",
+    //       sessionId: "..." }
+    //   Electron opens the URL via shell.openExternal(url),
+    //   then polls pollForEidToken(sessionId) on an interval.
+    return { available: false, reason: "deferred" }
   }
 
   /**
    * Poll server for eID auth completion.
-   * Called on interval after user is redirected to browser for eID.
    *
-   * NOT YET IMPLEMENTED — architectural placeholder.
+   * DH1 — deferred along with `startEidAuth`. Returns the same
+   * structured "not available" shape so the auth flow can skip
+   * the eID branch without exception handling.
+   *
+   * Future shape (when implemented):
+   *   GET /api/auth/desktop/eid/poll?sessionId=...
+   *   → { complete: false } while user is in browser,
+   *     then { complete: true, token: "...", expiresAt: ...,
+   *            userId: "..." }
    */
   async pollForEidToken(
-    _sessionId: string
-  ): Promise<{ complete: boolean; token?: string }> {
-    // Future: GET /api/auth/desktop/eid/poll?sessionId=...
-    // Returns { complete: false } while user is in browser,
-    // then { complete: true, token: "...", expiresAt: ..., userId: "..." }
-    throw new Error("eID auth not yet implemented")
+    _sessionId: string,
+  ): Promise<{ available: false; reason: "deferred" }> {
+    return { available: false, reason: "deferred" }
   }
 
   // ── Token Management (method-agnostic) ──────────────────────────────────
@@ -357,7 +371,11 @@ export class AuthManager {
       deviceId: `${os.hostname()}-${platform}-${os.userInfo().username}`,
       deviceName: os.hostname(),
       os: osType,
-      appVersion: "1.0.0", // TODO: read from package.json
+      // DH1 — sourced from Electron at runtime via `app.getVersion()`,
+      // which itself reads `package.json#version` at packaging time.
+      // No more hardcoded "1.0.0"; the heartbeat to the server now
+      // sends the real version baked into the binary.
+      appVersion: app.getVersion(),
     }
   }
 }
