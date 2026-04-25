@@ -31,7 +31,7 @@ export class NotificationManager {
     // Only show every 10%
     if (percent % 10 === 0 || percent === 100) {
       this.notify({
-        title: "Uploading to FamVault",
+        title: "Uploading to GeneGraph",
         body: `${filename}\n${percent}% complete`,
         silent: true,
       })
@@ -55,7 +55,7 @@ export class NotificationManager {
    */
   showError(message: string): void {
     this.notify({
-      title: "FamVault Error",
+      title: "GeneGraph Import Error",
       body: message,
       silent: false,
       urgency: "critical",

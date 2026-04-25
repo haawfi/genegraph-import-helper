@@ -5,11 +5,23 @@ import fs from "fs"
 /**
  * SettingsStore
  *
- * Persists user settings to a JSON file in the app's user data directory.
- * Simple, synchronous, no external dependencies.
+ * Persists user settings to a JSON file in the app's user data
+ * directory. Simple, synchronous, no external dependencies.
  *
- * Stored at: ~/Library/Application Support/FamVault Desktop Helper/settings.json (macOS)
- *            %APPDATA%/FamVault Desktop Helper/settings.json (Windows)
+ * After DH1 the productName changed from "FamVault Desktop Helper"
+ * to "GeneGraph Import Helper", so Electron now writes settings to
+ * a NEW directory:
+ *
+ *   macOS:   ~/Library/Application Support/GeneGraph Import Helper/settings.json
+ *   Windows: %APPDATA%/GeneGraph Import Helper/settings.json
+ *
+ * Existing alpha testers' old `FamVault Desktop Helper/` settings
+ * directory is left in place (settings are small — watch path,
+ * auto-launch flag, recent uploads list — so re-deriving them on
+ * first launch of the renamed app is a tolerable migration cost).
+ * The keychain auth token is preserved across the rename because
+ * `auth-manager.ts` keys keytar on a separate `SERVICE_NAME`
+ * string that stayed unchanged.
  */
 
 export interface AppSettings {

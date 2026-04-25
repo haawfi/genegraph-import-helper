@@ -1,7 +1,7 @@
 {
   "name": "famvault-desktop-helper",
   "version": "1.0.0-alpha.2",
-  "description": "FamVault Desktop Helper - Electron app for monitoring Google Takeout downloads and uploading to GeneGraph",
+  "description": "GeneGraph Import Helper — Electron app that brings Google Takeout archives and other large photo collections into GeneGraph.",
   "main": "dist/main.js",
   "author": "GeneGraph",
   "license": "MIT",
@@ -31,7 +31,7 @@
   },
   "build": {
     "appId": "com.genegraph.famvault.desktop-helper",
-    "productName": "FamVault Desktop Helper",
+    "productName": "GeneGraph Import Helper",
     "files": [
       "dist/**/*.js",
       "dist/**/*.js.map",
@@ -54,7 +54,7 @@
       "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "dmg": {
-      "title": "FamVault Desktop Helper ${version}"
+      "title": "GeneGraph Import Helper ${version}"
     },
     "win": {
       "icon": "build/icon.png",
@@ -68,7 +68,7 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": false,
       "deleteAppDataOnUninstall": true,
-      "shortcutName": "FamVault Desktop Helper"
+      "shortcutName": "GeneGraph Import Helper"
     },
     "linux": {
       "target": [

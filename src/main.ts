@@ -20,15 +20,25 @@ import { SettingsStore } from "./settings-store"
 import { showUploadConfirmation, ConfirmationRequest } from "./upload-confirmation"
 
 /**
- * FamVault Desktop Helper
+ * GeneGraph Import Helper
  *
  * Electron app that:
  * 1. Watches Downloads folder for Google Takeout archives
  * 2. Detects multi-part archives and waits for all parts
- * 3. Uploads to FamVault API with progress tracking
+ * 3. Uploads to the GeneGraph API with progress tracking
  * 4. Manages authentication via system keychain
  * 5. Runs in system tray with context menu
  * 6. Persists settings across restarts
+ *
+ * NOTE on internal naming (DH1): user-visible strings render as
+ * "GeneGraph Import Helper", but the on-disk identifiers
+ * (`appId: com.genegraph.famvault.desktop-helper`, package name
+ * `famvault-desktop-helper`, keychain `SERVICE_NAME` in
+ * auth-manager.ts, the `com.genegraph.famvault.desktop-helper`
+ * keychain access group in `build/entitlements.mac.plist`) stay
+ * as-is. Changing them would invalidate existing alpha-tester
+ * tokens and stored settings; a future v2.0 reconciliation can
+ * tidy up if/when it matters.
  */
 
 interface AppState {
@@ -110,7 +120,7 @@ function createTray() {
     // Mark as template so macOS handles dark/light mode automatically
     img.setTemplateImage(true)
     tray = new Tray(img)
-    tray.setToolTip("FamVault Desktop Helper")
+    tray.setToolTip("GeneGraph Import Helper")
     updateTrayMenu()
   } catch (err) {
     console.error("[Tray] Failed to create tray:", err)
