@@ -121,13 +121,67 @@ populate the market.
 ## What this means for the helper's commit history
 
 DH1 lands the production-readiness chassis: signing, notarization,
-auto-update, CI, naming, repo layout, download surface. DH2 (next)
-lands reliability hardening: SHA-256 chunk dedup, persisted
-upload state for crash recovery, OS sleep/wake handling, better
-error UX. Beyond DH2, the helper should not grow new feature
-surface — it grows in robustness and breadth-of-archives-supported
-(adding iCloud archive layout, OneDrive Personal Vault export
-formats, etc.) but stays an import bridge.
+auto-update, CI, naming, repo layout, download surface. DH2 lands
+reliability hardening: SHA-256 archive dedup, persisted upload
+state for crash recovery, OS sleep/wake handling, error
+classification, confirmation modal variants, tray-menu surfacing
+of resumable uploads. Beyond DH2, the helper should not grow new
+feature surface — it grows in robustness and
+breadth-of-archives-supported (adding iCloud archive layout,
+OneDrive Personal Vault export formats, etc.) but stays an
+import bridge.
+
+## Reliability invariants (DH2)
+
+After DH2, the helper holds the following four guarantees:
+
+1. **Resume actually works.** `chunked-uploader.ts` queries
+   `GET /api/import/desktop/upload/chunk?sessionId=X` before
+   every upload to learn which chunks the server already has.
+   Pre-DH2 that endpoint didn't exist; the helper's resume
+   path silently fell through to "start from zero" every time.
+   Now: re-uploaded bytes are zero unless the server lost data.
+
+2. **Crashing the helper mid-upload doesn't lose state.** Active
+   uploads are persisted to
+   `<userData>/upload-state.json` via atomic tmp-file + rename
+   on every confirmed chunk. On next launch the
+   `startup-reconciler.ts` queries the server's canonical state
+   for each entry and surfaces a Resume affordance via the tray
+   menu (`buildActiveUploadsMenuItems` in `main.ts`). No auto-
+   resume — the user clicked away from the upload originally,
+   they may have done so deliberately.
+
+3. **Re-detecting an already-uploaded archive is honest.** The
+   helper computes a streaming SHA-256 of every archive before
+   the modal opens and rides it as `archiveSha256` in the
+   session-create POST. The server short-circuits with one of:
+     - `{ deduplicated: true }` for a COMPLETED match → modal
+       variant shows "already uploaded on [date]" with Skip
+       (default) and Upload again (override).
+     - `{ resuming: true, session }` for a non-terminal match
+       → helper resumes that session id rather than creating
+       a new one.
+
+4. **OS sleeps don't cause spurious upload failures.**
+   `powerMonitor.suspend` flushes the upload-state store;
+   `powerMonitor.resume` arms the wake-clock for a 30-second
+   tolerance window. Failures inside that window don't count
+   against the chunked-uploader's 3-attempt retry budget — they
+   log + retry without advancing the counter. Outside the
+   window, normal retry policy applies (so a server that's
+   genuinely down doesn't get unbounded retries).
+
+5. **(Bonus invariant)** Error classification distinguishes
+   401 / 410 / 413 / 422 / 5xx / network failure. Auth-fail
+   pops the login window; permanent-fail surfaces a specific
+   message and stops retrying; transient/retry runs the
+   existing exponential-backoff path. Pre-DH2 every error got
+   the same three-attempt treatment regardless of category.
+
+The complete DH2 commit series is on `haawfi/genegraph` (server
+side) and `haawfi/genegraph-import-helper` (helper side); see
+`prompt-DH2-desktop-helper-reliability.md` for the full spec.
 
 When a feature request arrives that doesn't fit the import-bridge
 shape, default to "no, that's a future product expansion that
