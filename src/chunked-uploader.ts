@@ -2,6 +2,7 @@ import axios, { AxiosError } from "axios"
 import fs from "fs/promises"
 import path from "path"
 import { isInPostWakeWindow } from "./wake-clock"
+import { classifyError } from "./error-classification"
 
 /**
  * ChunkedUploader
@@ -45,6 +46,14 @@ export interface UploadProgress {
   retryAttempt?: number
   /** If state is "failed", the error message */
   errorMessage?: string
+  /** DH2 §4 — error classification when state is "failed". Lets
+   *  the consumer (main.ts) react differently to auth-fail
+   *  (route to login) vs permanent-fail (mark failed; don't
+   *  requeue) vs transient/retry (existing behavior). */
+  errorCategory?: "transient" | "retry" | "auth-fail" | "permanent-fail"
+  /** DH2 §4 — HTTP status when applicable. Surfaced so the
+   *  consumer can render permanentFailMessage(status). */
+  httpStatus?: number
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -178,7 +187,10 @@ export class ChunkedUploader {
             statusMessage: `Uploading chunk ${confirmedReceivedChunks.length}/${totalChunks}`,
           }
         } else {
-          // All retries exhausted for this chunk
+          // All retries exhausted (or auth-fail / permanent-fail
+          // short-circuit). Surface the classification so main.ts
+          // can decide whether to route to login, show a
+          // permanent-failure notification, or requeue.
           yield {
             state: "failed",
             uploadedBytes: confirmedUploadedBytes,
@@ -191,6 +203,8 @@ export class ChunkedUploader {
             receivedChunks: confirmedReceivedChunks,
             statusMessage: `Upload failed at chunk ${chunkIndex + 1}/${totalChunks}`,
             errorMessage: result.error,
+            errorCategory: result.category,
+            httpStatus: result.httpStatus,
           }
           return
         }
@@ -302,6 +316,10 @@ export class ChunkedUploader {
     receivedChunks?: number[]
     uploadedBytes?: number
     error?: string
+    /** DH2 §4 — only populated on failure. */
+    category?: "transient" | "retry" | "auth-fail" | "permanent-fail"
+    /** DH2 §4 — only populated on failure. */
+    httpStatus?: number
   }> {
     // DH2 §3 — `attempt` advances on every failure that counts
     // against the budget. Failures inside the post-wake tolerance
@@ -343,12 +361,34 @@ export class ChunkedUploader {
         const errMsg = error instanceof AxiosError
           ? error.response?.data?.error || error.message
           : String(error)
+        const httpStatus =
+          error instanceof AxiosError ? error.response?.status : undefined
+        const category = classifyError(error)
+
+        // DH2 §4 — auth-fail / permanent-fail short-circuit.
+        // Retrying these is wasted motion: a 401 needs the user
+        // to re-login, a 413 will never succeed, etc. Short-
+        // circuit returns the category so main.ts can render
+        // the right UX (auth flow vs failure notification vs
+        // requeue).
+        if (category === "auth-fail" || category === "permanent-fail") {
+          console.warn(
+            `[Uploader] Chunk ${chunkIndex} hit ${category} (HTTP ${httpStatus ?? "?"}); not retrying: ${errMsg}`,
+          )
+          return {
+            success: false,
+            error: errMsg,
+            category,
+            httpStatus,
+          }
+        }
 
         // DH2 §3 — post-wake exemption. Don't increment `attempt`,
         // don't decrement the budget. Just log + short delay +
         // try again. The window caps at 30s after the most
         // recent OS wake; outside it, normal retry budget
-        // applies.
+        // applies. Only applies to transient/retry categories,
+        // since auth-fail / permanent-fail already returned above.
         if (isInPostWakeWindow()) {
           console.warn(
             `[Uploader] Chunk ${chunkIndex} failed within the post-wake tolerance window; not counting against retry budget: ${errMsg}`,
@@ -362,7 +402,7 @@ export class ChunkedUploader {
           console.error(
             `[Uploader] Chunk ${chunkIndex} failed after ${MAX_RETRIES} attempts: ${errMsg}`
           )
-          return { success: false, error: errMsg }
+          return { success: false, error: errMsg, category, httpStatus }
         }
 
         // Exponential backoff: 1s, 2s, 4s

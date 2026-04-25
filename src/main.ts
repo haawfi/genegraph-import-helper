@@ -570,6 +570,29 @@ async function confirmAndUpload(
     )
   }
 
+  // ── DH2 §4: resolve modal variant from prior upload state ────────
+  // We look up the matching hash in BOTH the local upload-state-
+  // store (covers the helper-crashed-mid-upload path) AND the
+  // server's dedup endpoint via a HEAD-like POST (covers the
+  // "uploaded successfully on a different device" path).
+  // Server lookup is deferred to the actual upload-create POST —
+  // the local store is the only source of truth at modal time.
+  // Server-side dedup short-circuits inside executeSingleUpload.
+  let variant: "first-time" | "resume" | "already-uploaded" = "first-time"
+  let priorUploadAt: string | null = null
+  if (archiveSha256 && uploadStateStore) {
+    const localMatch = uploadStateStore
+      .list()
+      .find((u) => u.archiveSha256 === archiveSha256)
+    if (localMatch) {
+      // Local state remembers a prior in-progress upload of this
+      // exact archive. The reconciler may have already cleared
+      // completed entries, so anything here is non-terminal.
+      variant = "resume"
+      priorUploadAt = localMatch.startedAt
+    }
+  }
+
   // ── Safety gate: user confirmation ────────────────────────────────
   const confirmRequest: ConfirmationRequest = {
     archivePath,
@@ -581,6 +604,8 @@ async function confirmAndUpload(
     allParts: metadata.allPartsFound || [archivePath],
     verificationTier: appState.verificationTier,
     archiveSha256,
+    variant,
+    priorUploadAt,
   }
 
   const decision = await showUploadConfirmation(confirmRequest)
@@ -805,10 +830,37 @@ async function executeSingleUpload(
           uploadSucceeded = true
           break
 
-        case "failed":
-          notificationManager?.showError(
-            `Upload failed: ${progress.errorMessage || "Unknown error"}\n${progress.statusMessage}`
-          )
+        case "failed": {
+          // DH2 §4 — react differently per error category:
+          //   - auth-fail: surface re-login prompt; don't waste
+          //     retry cycles on a definitionally-doomed call.
+          //   - permanent-fail: surface specific status copy
+          //     (413 too large, 410 expired, etc.) so the user
+          //     knows what to do; mark failed; don't requeue.
+          //   - transient/retry: the chunked-uploader already
+          //     burned the retry budget; we still surface the
+          //     generic failure but the upload is dead for now.
+          if (progress.errorCategory === "auth-fail") {
+            notificationManager?.showError(
+              "Your session has expired. Please sign in to GeneGraph Import Helper again.",
+            )
+            console.warn(
+              `[Upload] auth-fail on ${filename}; surfacing login window.`,
+            )
+            // Bring up the login window so the user can re-auth.
+            // The next archive detection will pick up the fresh
+            // token automatically.
+            showLoginWindow()
+          } else if (progress.errorCategory === "permanent-fail") {
+            const { permanentFailMessage } = await import("./error-classification")
+            notificationManager?.showError(
+              `Upload of ${filename} failed: ${permanentFailMessage(progress.httpStatus)}`,
+            )
+          } else {
+            notificationManager?.showError(
+              `Upload failed: ${progress.errorMessage || "Unknown error"}\n${progress.statusMessage}`,
+            )
+          }
           // DH2 §2 — mark failed in the persistent store so the
           // next-launch reconciler surfaces it as a "previous
           // upload failed" affordance rather than a stale
@@ -820,6 +872,7 @@ async function executeSingleUpload(
             )
           }
           break
+        }
       }
     }
 

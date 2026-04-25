@@ -44,6 +44,20 @@ export interface ConfirmationRequest {
    *  that didn't compute a hash; the fingerprint affordance is
    *  hidden in that case. */
   archiveSha256?: string | null
+  /** DH2 §4 — modal variant. Resolved by main.ts before opening
+   *  the modal:
+   *    - "first-time": default — no prior upload of this hash.
+   *    - "resume": this hash matches a non-terminal session in
+   *               the local upload-state-store. Modal copy
+   *               offers Resume / Cancel.
+   *    - "already-uploaded": this hash matches a COMPLETED
+   *               session. Default button is Skip (the safe
+   *               choice); secondary is Upload again. */
+  variant?: "first-time" | "resume" | "already-uploaded"
+  /** DH2 §4 — ISO timestamp of the prior upload start (resume
+   *  variant) or completion (already-uploaded variant). Renders
+   *  in the modal as "started/uploaded on [date]". */
+  priorUploadAt?: string | null
 }
 
 export type ConfirmationResult = "approved" | "rejected" | "dismissed"
@@ -108,6 +122,62 @@ function buildConfirmationHTML(req: ConfirmationRequest): string {
   const isMedium = req.confidence === "medium"
   const isEmailTier = !req.verificationTier || req.verificationTier === "email"
 
+  // DH2 §4 — variant-aware copy. Defaults to "first-time" so
+  // legacy callers (no variant supplied) get the existing
+  // pre-DH2 modal shape exactly.
+  const variant = req.variant ?? "first-time"
+  const isResume = variant === "resume"
+  const isAlreadyUploaded = variant === "already-uploaded"
+  const priorDate = req.priorUploadAt
+    ? new Date(req.priorUploadAt).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
+    : null
+
+  // Title + subtitle vary by variant. Icon stays the package
+  // glyph except for "already-uploaded" which uses a checkmark
+  // to visually distinguish the safe-default state.
+  const headerIcon = isAlreadyUploaded ? "&#x2705;" : (isMedium ? "&#x26A0;" : "&#x1F4E6;")
+  let title: string
+  let subtitle: string
+  if (isResume) {
+    title = "Resume Upload?"
+    subtitle = priorDate
+      ? `We started uploading this archive on ${priorDate}. Resume from where we left off?`
+      : "We started uploading this archive previously. Resume from where we left off?"
+  } else if (isAlreadyUploaded) {
+    title = "Already Uploaded"
+    subtitle = priorDate
+      ? `This archive was uploaded successfully on ${priorDate}. Upload again anyway?`
+      : "This archive was uploaded successfully. Upload again anyway?"
+  } else {
+    title = isMedium ? "Possible Takeout Archive Detected" : "Google Takeout Archive Detected"
+    subtitle = isMedium
+      ? "A ZIP file that may be a Google Takeout export was found. Review the details below before uploading."
+      : "A Google Takeout archive was detected in your watched folder."
+  }
+
+  // Button labels also vary. For the "already-uploaded" variant
+  // the SAFE default is Skip — the spec is explicit about this:
+  // "the default button should be 'Skip' not 'Upload again'."
+  // We keep Approve/Reject button positions stable across
+  // variants so users have spatial consistency.
+  let rejectLabel = "Not now"
+  let approveLabel = "Upload to GeneGraph"
+  if (isResume) {
+    rejectLabel = "Cancel"
+    approveLabel = "Resume upload"
+  } else if (isAlreadyUploaded) {
+    // Approve = "Upload again" (override). Reject = "Skip"
+    // (safe default). Visual emphasis remains on Approve via
+    // the existing CSS, but the COPY makes Skip the right
+    // choice.
+    rejectLabel = "Skip — it's already in my vault"
+    approveLabel = "Upload again"
+  }
+
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -129,16 +199,19 @@ function buildConfirmationHTML(req: ConfirmationRequest): string {
   .btn-approve:hover { background: #007acc; }
   .btn-reject { background: #f0f0f0; color: #444; }
   .btn-reject:hover { background: #e0e0e0; }
+  /* DH2 §4 — for the already-uploaded variant we visually
+     elevate Skip (the safe default) by giving it the primary
+     blue and demoting Upload-again to the muted gray, even
+     though the IPC roles stay (Reject/Approve). */
+  .btn-flip-approve { background: #f0f0f0; color: #444; }
+  .btn-flip-approve:hover { background: #e0e0e0; }
+  .btn-flip-reject { background: #0096FF; color: white; }
+  .btn-flip-reject:hover { background: #007acc; }
   .path { font-size: 11px; color: #999; margin-top: 12px; word-break: break-all; line-height: 1.3; }
 </style></head><body>
-  <div class="icon">${isMedium ? "&#x26A0;" : "&#x1F4E6;"}</div>
-  <h2>${isMedium ? "Possible Takeout Archive Detected" : "Google Takeout Archive Detected"}</h2>
-  <p class="subtitle">
-    ${isMedium
-      ? "A ZIP file that may be a Google Takeout export was found. Review the details below before uploading."
-      : "A Google Takeout archive was detected in your watched folder."
-    }
-  </p>
+  <div class="icon">${headerIcon}</div>
+  <h2>${escapeHtml(title)}</h2>
+  <p class="subtitle">${escapeHtml(subtitle)}</p>
 
   <div class="details">
     <div class="row"><span class="label">File</span><span class="value" title="${escapeHtml(req.filename)}">${escapeHtml(req.filename)}</span></div>
@@ -152,7 +225,7 @@ function buildConfirmationHTML(req: ConfirmationRequest): string {
     }
   </div>
 
-  ${isMedium ? `
+  ${isMedium && variant === "first-time" ? `
   <div class="warning">
     <strong>Lower confidence detection.</strong> This file has a Google Takeout directory structure
     but is missing the standard Takeout marker file. If you did not recently export data from
@@ -160,7 +233,7 @@ function buildConfirmationHTML(req: ConfirmationRequest): string {
   </div>
   ` : ""}
 
-  ${isEmailTier ? `
+  ${isEmailTier && variant === "first-time" ? `
   <div class="stepup-info">
     Large imports may require identity verification in the future.
     You can upgrade at any time from the GeneGraph dashboard.
@@ -168,8 +241,8 @@ function buildConfirmationHTML(req: ConfirmationRequest): string {
   ` : ""}
 
   <div class="actions">
-    <button class="btn btn-reject" onclick="window.electronConfirmAPI.reject()">Not now</button>
-    <button class="btn btn-approve" onclick="window.electronConfirmAPI.approve()">Upload to GeneGraph</button>
+    <button class="btn ${isAlreadyUploaded ? "btn-flip-reject" : "btn-reject"}" onclick="window.electronConfirmAPI.reject()">${escapeHtml(rejectLabel)}</button>
+    <button class="btn ${isAlreadyUploaded ? "btn-flip-approve" : "btn-approve"}" onclick="window.electronConfirmAPI.approve()">${escapeHtml(approveLabel)}</button>
   </div>
 
   <p class="path">${escapeHtml(req.archivePath)}</p>
