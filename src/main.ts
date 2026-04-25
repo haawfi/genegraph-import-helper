@@ -20,6 +20,8 @@ import { NotificationManager } from "./notification-manager"
 import { SettingsStore } from "./settings-store"
 import { showUploadConfirmation, ConfirmationRequest } from "./upload-confirmation"
 import { hashArchive } from "./archive-hash"
+import { UploadStateStore, type ActiveUpload } from "./upload-state-store"
+import { reconcileOnStartup, type ReconcileOutcome } from "./startup-reconciler"
 
 /**
  * GeneGraph Import Helper
@@ -66,6 +68,15 @@ let multiPartCollector: MultiPartCollector | null = null
 let authManager: AuthManager | null = null
 let notificationManager: NotificationManager | null = null
 let loginWindow: BrowserWindow | null = null
+// DH2 §2 — persistent upload-state store. Created during
+// initializeApp() so the store is available before any code path
+// can mutate it. Survives crash + restart; corrupted files start
+// fresh with a logged warning.
+let uploadStateStore: UploadStateStore | null = null
+// DH2 §2 — outcomes from the most recent reconcile pass. The
+// tray menu (DH2 §5) reads from this list; user clicks "Resume"
+// or "Cancel" against entries here.
+let reconcileOutcomes: ReconcileOutcome[] = []
 
 /**
  * Initialize app
@@ -81,6 +92,10 @@ async function initializeApp() {
   const apiBaseUrl = settings.get("apiBaseUrl")
   authManager = new AuthManager(apiBaseUrl)
   notificationManager = new NotificationManager()
+  // DH2 §2 — load the persisted upload-state store. Created here
+  // so it's available before any reconciler / upload path can
+  // touch it.
+  uploadStateStore = new UploadStateStore()
 
   // Restore auto-start setting
   try {
@@ -106,6 +121,80 @@ async function initializeApp() {
   createTray()
   setupIpcHandlers()
   setupGracefulShutdown()
+
+  // DH2 §2 — startup reconciliation. Only runs when authenticated;
+  // unauthenticated users have no useful server queries to make.
+  // Surfaces outcomes via notifications + the tray menu (DH2 §5
+  // adds the menu section) — never auto-resumes per the spec
+  // ("the user clicked away — they may have done so deliberately").
+  if (appState.isAuthenticated && uploadStateStore.list().length > 0) {
+    await runStartupReconcile()
+  }
+}
+
+/**
+ * DH2 §2 — runs the reconciler against the current upload-state
+ * store and surfaces outcomes to the user. Intentionally
+ * non-blocking on failure: a network hiccup at startup leaves
+ * entries in the "unreachable" bucket, which the user can retry
+ * via the tray menu's Reconcile action (DH2 §5) or the next
+ * reconcile cycle (post-wake handler in §3 calls this too).
+ */
+async function runStartupReconcile(): Promise<void> {
+  if (!uploadStateStore || !authManager) return
+  const apiBaseUrl = settings.get("apiBaseUrl")
+  const authToken = await authManager.getToken()
+  if (!authToken) {
+    console.warn("[Reconcile] No auth token; skipping reconciliation.")
+    return
+  }
+  try {
+    reconcileOutcomes = await reconcileOnStartup({
+      apiBaseUrl,
+      authToken,
+      store: uploadStateStore,
+    })
+    for (const outcome of reconcileOutcomes) {
+      switch (outcome.kind) {
+        case "completed":
+          notificationManager?.showUploadComplete(
+            path.basename(outcome.entry.archivePath),
+            0,
+          )
+          console.log(
+            `[Reconcile] Server completed ${outcome.sessionId} in our absence; cleared local state.`,
+          )
+          break
+        case "resumable":
+          // Surface a notification — full UI affordance is in DH2
+          // §5 (tray menu). The user picks Resume or Cancel from
+          // the tray; we don't auto-resume.
+          notificationManager?.showDetection(
+            `Resumable upload: ${path.basename(outcome.entry.archivePath)} (${outcome.partsReceived}/${outcome.entry.partsExpected} parts on server)`,
+          )
+          console.log(
+            `[Reconcile] Resumable session ${outcome.sessionId}; waiting for user action.`,
+          )
+          break
+        case "expired":
+          notificationManager?.showDetection(
+            `Previous upload expired: ${path.basename(outcome.entry.archivePath)}. Re-detect to retry.`,
+          )
+          console.log(
+            `[Reconcile] Session ${outcome.sessionId} expired; cleared local state.`,
+          )
+          break
+        case "unreachable":
+          console.warn(
+            `[Reconcile] Couldn't reach server for ${outcome.sessionId}: ${outcome.error}. Will retry on next pass.`,
+          )
+          break
+      }
+    }
+    updateTrayMenu()
+  } catch (err) {
+    console.error("[Reconcile] Failed:", err)
+  }
 }
 
 /**
@@ -659,6 +748,27 @@ async function executeSingleUpload(
       )
     }
 
+    // DH2 §2 — record the in-progress upload in the persistent
+    // store BEFORE the first chunk POST. If the helper crashes
+    // mid-upload, this entry survives and the next launch's
+    // reconciler will surface a Resume affordance to the user.
+    if (uploadStateStore && metadata.archiveSha256) {
+      const totalBytes = metadata.fileSizeBytes || metadata.totalBytes || 0
+      const partsExpected = metadata.totalParts || Math.ceil(totalBytes / (5 * 1024 * 1024)) || 1
+      const upload: ActiveUpload = {
+        sessionId,
+        archivePath,
+        archiveSha256: metadata.archiveSha256,
+        totalBytes,
+        partsExpected,
+        lastConfirmedChunk: -1,
+        startedAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
+        status: "uploading",
+      }
+      uploadStateStore.upsert(upload)
+    }
+
     // ── Upload with server-confirmed progress ───────────────────────
     let lastNotifiedPercent = -1
     let uploadSucceeded = false
@@ -677,6 +787,15 @@ async function executeSingleUpload(
             notificationManager?.showUploadProgress(filename, percent)
             lastNotifiedPercent = percent
           }
+          // DH2 §2 — persist the highest server-confirmed chunk
+          // index after every advance so a crash leaves a useful
+          // resume pointer.
+          if (uploadStateStore) {
+            uploadStateStore.recordChunkConfirmed(
+              sessionId,
+              progress.currentChunk,
+            )
+          }
           break
         }
 
@@ -688,11 +807,27 @@ async function executeSingleUpload(
           notificationManager?.showError(
             `Upload failed: ${progress.errorMessage || "Unknown error"}\n${progress.statusMessage}`
           )
+          // DH2 §2 — mark failed in the persistent store so the
+          // next-launch reconciler surfaces it as a "previous
+          // upload failed" affordance rather than a stale
+          // "uploading" entry.
+          if (uploadStateStore) {
+            uploadStateStore.markFailed(
+              sessionId,
+              progress.errorMessage || "Unknown error",
+            )
+          }
           break
       }
     }
 
     if (uploadSucceeded) {
+      // DH2 §2 — clear the persisted entry on completion. Failed
+      // entries are kept (above) so the user can see the failure
+      // reason on next startup.
+      if (uploadStateStore) {
+        uploadStateStore.remove(sessionId)
+      }
       // Add to recent uploads (persisted)
       const recent = settings.get("recentUploads")
       recent.unshift(filename)
