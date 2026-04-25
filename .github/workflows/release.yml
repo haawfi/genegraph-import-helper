@@ -110,16 +110,33 @@ jobs:
       # without secrets so the pipeline is provably correct
       # before the first signed release goes out.
       #
+      # Unset-empty-signing-vars idiom: GitHub Actions sets env
+      # vars from `secrets.X` to the empty string when the secret
+      # isn't defined. electron-builder interprets `CSC_LINK=""`
+      # as "use cwd as cert path" which then trips a `not a file`
+      # error on the runner's project-root directory. The
+      # `[ -z "$X" ] && unset X` lines below scrub empties so
+      # electron-builder sees the variables as truly absent and
+      # falls back to its skip-signing path.
+      #
       # `shell: bash` works on both macOS and Windows runners
       # (Git Bash is preinstalled on windows-latest).
       - name: Build + publish
         shell: bash
         run: |
+          [ -z "$CSC_LINK" ]              && unset CSC_LINK
+          [ -z "$CSC_KEY_PASSWORD" ]      && unset CSC_KEY_PASSWORD
+          [ -z "$WIN_CSC_LINK" ]          && unset WIN_CSC_LINK
+          [ -z "$WIN_CSC_KEY_PASSWORD" ]  && unset WIN_CSC_KEY_PASSWORD
+          [ -z "$APPLE_API_KEY_ID" ]      && unset APPLE_API_KEY_ID
+          [ -z "$APPLE_API_KEY_ISSUER_ID" ] && unset APPLE_API_KEY_ISSUER_ID
+
           if [ -n "$GH_TOKEN" ]; then
             echo "GH_TOKEN present — running with --publish always"
             npm run dist -- --publish always
           else
             echo "GH_TOKEN absent — building unsigned/un-published artifacts only"
+            unset GH_TOKEN
             npm run dist -- --publish never
           fi
         env:
