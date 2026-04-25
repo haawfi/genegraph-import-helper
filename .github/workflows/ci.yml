@@ -1,0 +1,36 @@
+# DH1 §6 — push-time CI for the GeneGraph Import Helper.
+#
+# Cheap-and-fast checks on every push and PR: tsc compiles, no
+# regressions in the source. Deliberately does NOT run
+# electron-builder — packaging takes 5+ minutes and burns Actions
+# minutes for no benefit on every push. Builds happen on tag in
+# release.yml.
+#
+# Lint is intentionally skipped — the helper has no eslint config
+# at v1. Adding one is out of DH1 scope; if/when we add it, drop
+# a `npm run lint` step here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript compile check
+        run: npx tsc --noEmit
