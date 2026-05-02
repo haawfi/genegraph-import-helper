@@ -84,6 +84,7 @@
       "notarize": false
     },
     "afterSign": "build/notarize.js",
+    "afterAllArtifactBuild": "build/notarize-dmg.js",
     "dmg": {
       "title": "GeneGraph Import Helper ${version}"
     },

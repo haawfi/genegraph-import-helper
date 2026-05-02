@@ -8,19 +8,31 @@ secrets injected from Actions.
 
 ## Status (2026-05-02)
 
-- **Apple Developer Program enrollment: in review** (Enrollment ID
-  `5935H366TV`, team "AccuWealth Holding Oy" — the older legal name
-  for AWFi Group Oy). Until Apple approves the enrollment, the
-  certificate-management UI at developer.apple.com and App Store
-  Connect access are both gated. Typical wait: 24–48 h after a
-  successful payment + DUNS verification; some entities wait longer.
-- The build pipeline (`electron-builder`, `build/notarize.js`
-  afterSign hook, `build/entitlements.mac.plist`) is already wired.
-  All that's missing is the cert + the API key.
-- A Certificate Signing Request was pre-staged at
-  `~/.genegraph/notarization/genegraph-helper.csr` so it's ready to
-  upload the moment Apple approves. The matching private key is at
-  `~/.genegraph/notarization/genegraph-helper.key` (mode `600`).
+Pipeline is **live** under the founder's individual Apple Developer
+account, not the AWFi Group Oy organization enrollment (which was
+still in review when this work happened). The decision was to ship
+the alpha now and revisit the org account later — the Gatekeeper
+"verified developer" prompt currently reads "HAFIZ HASNAT AHMAD"
+rather than the company name.
+
+Live values:
+
+| Thing | Value |
+|---|---|
+| Apple team | `HAFIZ HASNAT AHMAD` (individual) |
+| Team ID | `U4ZFU569NH` |
+| Cert SHA1 | `9D062275D7FDEF3A16CC46DDB5F4FD3944AAF646` |
+| Cert expiry | 2031-05-03 (5 years) |
+| ASC API Key ID | `ASUXRXSDPJ` |
+| ASC API Issuer ID | `6296ec18-f35e-4bf3-9cbd-42f35bd24eb0` |
+| ASC API key file | `~/.appstoreconnect/private_keys/AuthKey_ASUXRXSDPJ.p8` |
+
+The build pipeline (`electron-builder`, `build/notarize.js`
+afterSign hook, `build/entitlements.mac.plist`) was already wired
+from DH1. The .p12 (cert + private key bundle) lives at
+`~/.genegraph/notarization/developerID_application.p12`; the export
+password is in 1Password / the founder's password store (not on
+disk).
 
 ---
 
@@ -156,19 +168,27 @@ Once the one-time setup is done, every release looks like:
 ```bash
 cd ~/Desktop/GeneGraph/desktop-helper
 
-# Identity for codesign — replace TEAMID with the 10-char team id
-export CSC_NAME="Developer ID Application: AWFi Group Oy (TEAMID)"
+# Identity for codesign.
+#
+# CRITICAL: electron-builder 26.x rejects the "Developer ID
+# Application:" prefix and tells you to remove it. Use the SHA1
+# instead — unambiguous + survives any common-name change Apple
+# might do later.
+#
+# Get the SHA1 from: security find-identity -v -p codesigning
+# (the 40-char hex prefix on the Developer ID Application line)
+export CSC_NAME="9D062275D7FDEF3A16CC46DDB5F4FD3944AAF646"
 export CSC_KEYCHAIN=login.keychain-db
 
 # notarytool credentials — paths + ids from Phase 5 above
-export APPLE_API_KEY_ID="<KEYID>"
-export APPLE_API_KEY_ISSUER_ID="<ISSUER_UUID>"
-export APPLE_API_KEY="$HOME/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8"
+export APPLE_API_KEY_ID="ASUXRXSDPJ"
+export APPLE_API_KEY_ISSUER_ID="6296ec18-f35e-4bf3-9cbd-42f35bd24eb0"
+export APPLE_API_KEY="$HOME/.appstoreconnect/private_keys/AuthKey_ASUXRXSDPJ.p8"
 
 # Unlock the keychain so codesign can read the private key
-# non-interactively. Skip if Keychain is already unlocked in this
-# shell session.
-security unlock-keychain login.keychain-db
+# non-interactively. Triggers a macOS GUI prompt for the login
+# password the first time per session.
+security unlock-keychain ~/Library/Keychains/login.keychain-db
 
 # Build, sign, notarize, staple
 npm run dist:mac
@@ -178,11 +198,16 @@ npm run dist:mac
 # and "stapled".
 ```
 
-The build pipeline (electron-builder + build/notarize.js afterSign)
-reads `CSC_NAME` for codesign and the `APPLE_API_KEY*` vars for
-notarytool. Both halves are required for a Gatekeeper-clean
-artifact; missing either falls through to an unsigned dev build
-(see `build/notarize.js` short-circuit logic).
+The build pipeline (electron-builder + `build/notarize.js`
+afterSign + `build/notarize-dmg.js` afterAllArtifactBuild) reads
+`CSC_NAME` for codesign and the `APPLE_API_KEY*` vars for
+notarytool. The afterSign hook notarizes + staples the **.app
+bundle**; the afterAllArtifactBuild hook notarizes + staples each
+**.dmg** afterwards (electron-builder builds the DMG after the
+afterSign hook runs, so the DMG won't have a ticket without this
+second pass). Both halves are required for a fully Gatekeeper-clean
+artifact that works offline; missing the env vars short-circuits
+to an unsigned dev build.
 
 ### Verifying the artifact
 
@@ -330,17 +355,22 @@ xattr -d com.apple.quarantine /Applications/GeneGraph\ Import\ Helper.app
 
 ## Discoveries worth surfacing
 
-- **Apple's record of legal entity is "AccuWealth Holding Oy"**,
-  the older name. The active entity is **AWFi Group Oy** (Y
-  3460768-7). Until Apple's record is updated, the Developer ID
-  Application cert (and the publisher name shown to users in the
-  Gatekeeper "verified developer" prompt) will read "AccuWealth
-  Holding Oy". To update: contact Apple Developer Support with
-  legal documentation of the name change. Cosmetic only —
-  signing works either way.
+- **Currently signed under the founder's individual account**
+  (HAFIZ HASNAT AHMAD / U4ZFU569NH), not the AWFi Group Oy
+  organization. The Gatekeeper "verified developer" prompt reads
+  the founder's name. To switch later: re-do Sections 3–5 against
+  the org account once that enrollment is approved (CSR is
+  reusable; only the cert + .p12 + ASC API key change). The
+  unrelated org enrollment (ID `5935H366TV`, team filed under the
+  older "AccuWealth Holding Oy" name) was still under review at
+  ship time — typical wait 24–48 h after DUNS, sometimes longer.
 - The `electron-builder` config has `mac.notarize: false` AND an
   `afterSign: "build/notarize.js"` hook. This is intentional —
   the hook handles notarization explicitly so the CI pipeline
   can short-circuit when secrets are absent (dev builds). Don't
   flip `mac.notarize` to `true` — that would double-notarize
   and break the build.
+- **electron-builder 26.x rejects `CSC_NAME="Developer ID
+  Application: ..."` with "remove the prefix"** — use either the
+  bare common name or (preferred) the SHA1 of the identity. The
+  per-build snippet above uses SHA1 for that reason.
