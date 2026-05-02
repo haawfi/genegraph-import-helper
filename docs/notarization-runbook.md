@@ -237,6 +237,82 @@ xcrun stapler validate "$DMG"
 
 ---
 
+## Distribution
+
+After a clean notarized + stapled build lands in `dist/`, ship it
+to users through GitHub Releases on this repo
+(`haawfi/genegraph-import-helper`). The web app reads the asset URL
+from a Vercel env var, so the upload + env-var update are paired.
+
+```bash
+cd ~/Desktop/GeneGraph/desktop-helper
+REPO=haawfi/genegraph-import-helper
+TAG=desktop-helper-vX.Y.Z   # match the package.json version
+
+# 1. Upload both DMGs to the existing release tag (or create a new
+#    one — first push the tag with `git tag $TAG <SHA> && git push
+#    origin $TAG`, then `gh release create $TAG ...`).
+#
+#    Replacing assets on an existing tag is fine — `--clobber` lets
+#    you overwrite, and the URL stays stable. Drop the OLD unsigned
+#    asset first to avoid two competing macOS files on the release.
+gh release delete-asset "$TAG" "<old-mac-asset-name>.dmg" --repo "$REPO" --yes || true
+gh release upload "$TAG" \
+  "dist/GeneGraph Import Helper-X.Y.Z-arm64.dmg" \
+  "dist/GeneGraph Import Helper-X.Y.Z.dmg" \
+  --repo "$REPO" --clobber
+
+# 2. GitHub auto-sanitizes spaces in filenames to "." in URLs:
+#    "GeneGraph Import Helper-X.Y.Z-arm64.dmg"
+#      → "GeneGraph.Import.Helper-X.Y.Z-arm64.dmg"
+#    Capture the canonical asset URLs (the env-var must point at
+#    the period-form, not %20):
+ARM64_URL="https://github.com/haawfi/genegraph-desktop-releases/releases/download/$TAG/GeneGraph.Import.Helper-X.Y.Z-arm64.dmg"
+
+# 3. Update the Vercel env vars on the web project.
+#
+#    DO NOT use `vercel env add` from CLI 52.x — it has a regression
+#    where new vars default to `type: "sensitive"` and pipe/heredoc
+#    input lands as empty. Use the API directly:
+TOKEN=$(jq -r .token ~/Library/Application\ Support/com.vercel.cli/auth.json)
+PROJECT_ID=prj_2xWGH6hkDnULHq7F4hkFC2W7zR9w
+ORG_ID=team_xOM7786toQZdYZ68l1Jc8LgD
+# DELETE the old vars first (safer than PATCH, which silently fails
+# on sensitive-typed entries):
+for ID in <NEXT_PUBLIC_DESKTOP_HELPER_URL_ID> <NEXT_PUBLIC_DESKTOP_HELPER_URL_MAC_ID>; do
+  curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+    "https://api.vercel.com/v9/projects/$PROJECT_ID/env/$ID?teamId=$ORG_ID"
+done
+# POST fresh entries with type=plain (non-sensitive — required for
+# `vercel env pull` to be able to read them back during local dev):
+for KEY in NEXT_PUBLIC_DESKTOP_HELPER_URL NEXT_PUBLIC_DESKTOP_HELPER_URL_MAC; do
+  curl -X POST -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg k "$KEY" --arg v "$ARM64_URL" \
+      '{key:$k, value:$v, type:"plain", target:["production"]}')" \
+    "https://api.vercel.com/v10/projects/$PROJECT_ID/env?teamId=$ORG_ID"
+done
+
+# 4. Trigger a Vercel rebuild. NEXT_PUBLIC_* values are inlined at
+#    build time — env-var changes alone don't update the live page;
+#    a fresh build is required. Easiest path: push any commit to
+#    main (e.g. a copy fix on the download page); a no-op rebuild
+#    via the dashboard works too.
+
+# 5. Verify end-to-end: download from https://www.genegraph.eu/dashboard/download
+#    on a Mac that has never seen the unsigned version. The .app
+#    should open without the "developer cannot be verified"
+#    Gatekeeper warning. If it persists, clear the cached verdict:
+#    xattr -d com.apple.quarantine /Applications/GeneGraph\ Import\ Helper.app
+```
+
+The arm64 build is the primary download (~80%+ of new Macs since
+2020). The x64 build also lives on the release for users who find
+it via "Browse all releases" — keeps Intel users covered without
+adding a second download button on the page.
+
+---
+
 ## Cert renewal
 
 Developer ID Application certs are valid for **5 years**.
